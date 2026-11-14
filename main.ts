@@ -104,6 +104,16 @@ function log(message: string): void {
 async function load(): Promise<void> {
   if (brief.error !== null) log(brief.error);
   probes = await Promise.all(brief.directory.providers.map((provider) => probeProvider(ENV_URL, provider, PROBE_TIMEOUT_MS)));
+  // A catalog probe that failed leaves its provider out of the catalog and gets no traffic, which
+  // costs catalog points and the provider's models: one retry each, since a refused connection is
+  // the only failure mode a local probe has and it is worth one more attempt.
+  for (const probe of probes.filter((p) => !p.ok)) {
+    const retry = await probeProvider(ENV_URL, probe.provider, PROBE_TIMEOUT_MS);
+    if (retry.ok) {
+      probes[probes.indexOf(probe)] = retry;
+      log(`catalog probe to ${probe.provider.id} succeeded on retry`);
+    }
+  }
   for (const probe of probes) if (!probe.ok && probe.error !== null) log(probe.error);
   catalog = buildCatalog(ENV_URL, probes, brief.ratings);
 }
@@ -115,7 +125,10 @@ function servedModels(): ServedModel[] {
   const out: ServedModel[] = [];
   for (const probe of probes) {
     if (!probe.ok) continue;
+    const seen = new Set<string>();
     for (const model of [...probe.models].sort(byId)) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
       const row = ratingOfModel(brief.ratings, probe.provider.id, model.id);
       if (!modelFree(model, row)) continue;
       out.push({ id: model.id, provider: probe.provider.id, display_name: model.display_name });
@@ -140,7 +153,10 @@ function candidatesFor(requires: Requirement, jsonMode: boolean): Candidate[] {
   for (const probe of probes) {
     if (!probe.ok) continue;
     if (jsonMode && probe.provider.wire === 'anthropic') continue;
+    const seen = new Set<string>();
     for (const model of probe.models) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
       const row = ratingOfModel(brief.ratings, probe.provider.id, model.id);
       if (!modelFree(model, row)) continue;
       if (!meetsRequirements(requires, capabilitiesOf(model, row))) continue;
